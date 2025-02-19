@@ -1,0 +1,36 @@
+GET http://localhost:8080
+
+###
+
+GET http://localhost:8080/app
+
+###
+
+POST http://localhost:8080/api/validate_chirp
+
+{
+    "body": "this is a testttteqwerqwfeqgjfhegqwjfgewuyfgueqwfguewgfuyewgfuyewgfuewygfuyewgfuyewgfuyewgfuewgufewgbn34jkfgbj34bfjhkew4bfi87y634gfh789436gf7834gr78g4768rg43786gr7834"
+}
+
+###
+
+POST http://localhost:8080/api/validate_chirp
+
+{
+    "body": "this is a test"
+}
+
+###
+POST http://localhost:8080/api/validate_chirp
+
+{
+  "body": "I had something interesting for breakfast"
+}
+
+
+### POST
+POST http://localhost:8080/api/validate_chirp
+
+{
+  "body": "lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum."
+}
