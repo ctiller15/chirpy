@@ -1,25 +1,16 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
+	"database/sql"
 	"log"
 	"net/http"
-	"sync/atomic"
+	"os"
 
-	"github.com/ctiller15/chirpy/utils"
+	"github.com/ctiller15/chirpy/internal/api"
+	"github.com/ctiller15/chirpy/internal/database"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
-
-type apiConfig struct {
-	fileserverHits atomic.Int32
-}
-
-func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg.fileserverHits.Add(1)
-		next.ServeHTTP(w, r)
-	})
-}
 
 func handleReady(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -27,108 +18,45 @@ func handleReady(w http.ResponseWriter, req *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-func respondWithError(w http.ResponseWriter, code int, msg string) {
-	type errStruct struct {
-		Error string `json:"error"`
-	}
-
-	newErr := errStruct{
-		Error: msg,
-	}
-
-	dat, err := json.Marshal(newErr)
-	if err != nil {
-		log.Printf("Error marshalling JSON: %s", err)
-		w.WriteHeader(500)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	w.Write(dat)
-}
-
-func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
-
-	dat, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("Error marshalling JSON: %s", err)
-		w.WriteHeader(500)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	w.Write(dat)
-}
-
-func handleValidateChirp(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
-		Body string `json:"body"`
-	}
-
-	type responseStruct struct {
-		CleanedBody string `json:"cleaned_body"`
-	}
-
-	decoder := json.NewDecoder(r.Body)
-	params := parameters{}
-	err := decoder.Decode(&params)
-	if err != nil {
-
-		log.Printf("Error decoding parameters: %s", err)
-
-		respondWithError(w, 500, "Something went wrong")
-	}
-
-	if len(params.Body) > 140 {
-		respondWithError(w, 400, "Chirp is too long")
-	} else {
-		cleanedText := utils.CleanProfanity(params.Body)
-		response := responseStruct{
-			CleanedBody: cleanedText,
-		}
-
-		respondWithJSON(w, 200, response)
-	}
-}
-
-func (cfg *apiConfig) handleAdminMetrics(w http.ResponseWriter, r *http.Request) {
-	const htmlTemplate = `<html>
-	<body>
-	  <h1>Welcome, Chirpy Admin</h1>
-	  <p>Chirpy has been visited %d times!</p>
-	</body>
-  </html>`
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(200)
-
-	w.Write([]byte(fmt.Sprintf(htmlTemplate, cfg.fileserverHits.Load())))
-}
-
-func (cfg *apiConfig) handleReset(w http.ResponseWriter, req *http.Request) {
-	cfg.fileserverHits.Store(0)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(200)
-	w.Write([]byte("OK"))
-}
-
 func main() {
-	var apiCfg apiConfig
+	godotenv.Load()
+
+	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
+	secret := os.Getenv("SECRET")
+
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	dbQueries := database.New(db)
+
+	apiCfg := api.NewApiConfig(dbQueries, platform, secret)
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/healthz", handleReady)
-	mux.HandleFunc("POST /api/validate_chirp", handleValidateChirp)
-	mux.HandleFunc("POST /admin/reset", apiCfg.handleReset)
-	// mux.HandleFunc("GET /api/metrics", apiCfg.handleMetrics)
-	mux.HandleFunc("GET /admin/metrics", apiCfg.handleAdminMetrics)
-	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
+	mux.HandleFunc("POST /api/users", apiCfg.HandleCreateUser)
+
+	mux.HandleFunc("GET /api/chirps", apiCfg.HandleGetChirps)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.HandleGetChirpByID)
+	mux.HandleFunc("POST /api/chirps", apiCfg.HandleCreateChirp)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.HandleDeleteChirpByID)
+	mux.HandleFunc("POST /api/login", apiCfg.HandleLoginUser)
+	mux.HandleFunc("POST /api/refresh", apiCfg.HandleTokenRefresh)
+	mux.HandleFunc("POST /api/revoke", apiCfg.HandleTokenRevoke)
+	mux.HandleFunc("PUT /api/users", apiCfg.HandleUpdateUser)
+
+	mux.HandleFunc("POST /admin/reset", apiCfg.HandleReset)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.HandleAdminMetrics)
+	mux.Handle("/app/", apiCfg.MiddlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 	server := http.Server{
 		Handler: mux,
 		Addr:    ":8080",
 	}
 
-	err := server.ListenAndServe()
+	err = server.ListenAndServe()
 	if err != nil {
 		log.Fatal(err)
 	}
