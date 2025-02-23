@@ -45,3 +45,5 @@ go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
 ```bash
 go build -o out && ./out
 ```
+
+## API Resources

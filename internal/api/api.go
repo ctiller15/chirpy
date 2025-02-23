@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -21,13 +22,15 @@ type apiConfig struct {
 	db             *database.Queries
 	platform       string
 	secret         string
+	polka_key      string
 }
 
-func NewApiConfig(db *database.Queries, platform string, secret string) *apiConfig {
+func NewApiConfig(db *database.Queries, platform string, secret string, polka_key string) *apiConfig {
 	cfg := apiConfig{
-		db:       db,
-		platform: platform,
-		secret:   secret,
+		db:        db,
+		platform:  platform,
+		secret:    secret,
+		polka_key: polka_key,
 	}
 
 	return &cfg
@@ -108,6 +111,18 @@ func (cfg *apiConfig) HandleCreateChirp(w http.ResponseWriter, r *http.Request) 
 
 func (cfg *apiConfig) HandleGetChirps(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	author_id_query := r.URL.Query().Get("author_id")
+	var author_id uuid.UUID
+	if author_id_query == "" {
+		author_id = uuid.Nil
+	} else {
+		author_id = uuid.MustParse(author_id_query)
+	}
+
+	sortDir := r.URL.Query().Get("sort")
+	if sortDir == "" {
+		sortDir = "asc"
+	}
 
 	type responseStruct struct {
 		ID        uuid.UUID `json:"id"`
@@ -117,15 +132,38 @@ func (cfg *apiConfig) HandleGetChirps(w http.ResponseWriter, r *http.Request) {
 		UserID    uuid.UUID `json:"user_id"`
 	}
 
-	chirps, err := cfg.db.GetChirps(ctx)
-	if err != nil {
-		respondWithError(w, 500, err.Error())
-		return
+	var chirps []database.Chirp
+
+	if author_id == uuid.Nil {
+		db_chirps, err := cfg.db.GetChirps(ctx)
+		if err != nil {
+			respondWithError(w, 500, err.Error())
+			return
+		}
+
+		chirps = db_chirps
+	} else {
+		db_chirps, err := cfg.db.GetChirpsByUserID(ctx, author_id)
+		if err != nil {
+			respondWithError(w, 500, err.Error())
+			return
+		}
+		chirps = db_chirps
 	}
 
 	response := make([]responseStruct, 0)
 	for _, chirp := range chirps {
 		response = append(response, responseStruct(chirp))
+	}
+
+	if sortDir == "desc" {
+		sort.Slice(response, func(i, j int) bool {
+			return response[i].CreatedAt.After(response[j].CreatedAt)
+		})
+	} else {
+		sort.Slice(response, func(i, j int) bool {
+			return response[i].CreatedAt.Before(response[j].CreatedAt)
+		})
 	}
 
 	respondWithJSON(w, 200, response)
@@ -208,6 +246,7 @@ func (cfg *apiConfig) HandleLoginUser(w http.ResponseWriter, r *http.Request) {
 		Email        string    `json:"email"`
 		Token        string    `json:"token"`
 		RefreshToken string    `json:"refresh_token"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -262,6 +301,7 @@ func (cfg *apiConfig) HandleLoginUser(w http.ResponseWriter, r *http.Request) {
 		Email:        user.Email,
 		Token:        newJWT,
 		RefreshToken: refreshToken.Token,
+		IsChirpyRed:  user.IsChirpyRed,
 	})
 }
 
@@ -329,6 +369,56 @@ func (cfg *apiConfig) HandleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	respondWithJSON(w, 200, response)
 }
 
+func (cfg *apiConfig) HandlePolkaWebhook(w http.ResponseWriter, r *http.Request) {
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil || apiKey != cfg.polka_key {
+		respondWithError(w, 401, "invalid api key")
+		return
+	}
+
+	ctx := r.Context()
+	type parameters struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}
+
+	// This pattern happens a lot. Handle on a refactor.
+	params := parameters{}
+	decoder := json.NewDecoder(r.Body)
+	err = decoder.Decode(&params)
+
+	if err != nil {
+		log.Printf("error decoding parameters: %s", err)
+
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		w.WriteHeader(204)
+		return
+	}
+
+	updateChirpyRedStatusParams := database.UpdateChirpyRedStatusParams{
+		IsChirpyRed: true,
+		ID:          params.Data.UserID,
+	}
+
+	_, err = cfg.db.UpdateChirpyRedStatus(ctx, updateChirpyRedStatusParams)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			w.WriteHeader(404)
+			return
+		}
+		respondWithError(w, 500, err.Error())
+		return
+	}
+
+	w.WriteHeader(204)
+}
+
 func (cfg *apiConfig) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Email    string `json:"email"`
@@ -336,10 +426,11 @@ func (cfg *apiConfig) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type responseStruct struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
+		ID          uuid.UUID `json:"id"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Email       string    `json:"email"`
+		IsChirpyRed bool      `json:"is_chirpy_red"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -372,10 +463,11 @@ func (cfg *apiConfig) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := responseStruct{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+		ID:          user.ID,
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
 	}
 
 	respondWithJSON(w, 201, res)
